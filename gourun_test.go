@@ -54,3 +54,25 @@ func TestGoMinor(t *testing.T) {
         t.Fatal(goMinor("bad"))
     }
 }
+
+func TestRunShellTrampolineShebangScript(t *testing.T) {
+    dir := filepath.Join(t.TempDir(), "space dir")
+    err := os.Mkdir(dir, 0700)
+    if err != nil {
+        t.Fatal(err)
+    }
+    script := filepath.Join(dir, "hello script.go")
+    err = os.WriteFile(script, []byte("#!/bin/sh\n///bin/sh -c 'exit 99' \"$0\" \"$@\"; exit\npackage main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tfmt.Println(os.Args[1:])\n}\n"), 0700)
+    if err != nil {
+        t.Fatal(err)
+    }
+    var stdout bytes.Buffer
+    var stderr bytes.Buffer
+    code := run(context.Background(), []string{"-rebuild", script, "raw", "curl"}, &stdout, &stderr)
+    if code != 0 {
+        t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+    }
+    if strings.TrimSpace(stdout.String()) != "[raw curl]" {
+        t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+    }
+}
