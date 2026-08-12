@@ -1,6 +1,3 @@
-// Gourun caches Go scripts as native binaries and can pack cross-built binaries
-// into one Actually Portable Executable.
-// Source: https://github.com/jart/cosmopolitan/blob/master/ape/specification.md
 package main
 
 import (
@@ -75,7 +72,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	fs.StringVar(&o.output, "o", "", "write an APE instead of running the script")
 	fs.StringVar(&o.targets, "targets", "common", "comma-separated GOOS/GOARCH targets")
-	fs.IntVar(&o.jobs, "j", min(runtime.NumCPU(), 4), "parallel cross-builds")
+	fs.IntVar(&o.jobs, "j", minInt(runtime.NumCPU(), 4), "parallel cross-builds")
 	fs.BoolVar(&o.rebuild, "rebuild", false, "ignore cached builds")
 	fs.BoolVar(&o.verbose, "v", false, "print timestamped build events")
 	fs.BoolVar(&o.version, "version", false, "print version")
@@ -208,6 +205,7 @@ type builder struct {
 	cache     string
 	goVersion string
 	rebuild   bool
+	buildVCS  bool
 	verbose   bool
 	stderr    io.Writer
 }
@@ -228,16 +226,39 @@ func newBuilder(o options, stderr io.Writer) (*builder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("go version: %s", strings.TrimSpace(string(out)))
 	}
+	version := strings.TrimSpace(string(out))
 	return &builder{
 		cache:     filepath.Join(cache, "gourun", "v2"),
-		goVersion: strings.TrimSpace(string(out)),
+		goVersion: version,
+		buildVCS:  supportsBuildVCS(version),
 		rebuild:   o.rebuild,
 		verbose:   o.verbose,
 		stderr:    stderr,
 	}, nil
 }
 
-func (b *builder) log(t target, format string, args ...any) {
+func supportsBuildVCS(version string) bool {
+	return goMinor(version) >= 18
+}
+
+func goMinor(version string) int {
+	i := strings.Index(version, "go1.")
+	if i < 0 {
+		return 0
+	}
+	i += len("go1.")
+	n := 0
+	for ; i < len(version); i++ {
+		c := version[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+func (b *builder) log(t target, format string, args ...interface{}) {
 	if !b.verbose {
 		return
 	}
@@ -281,11 +302,11 @@ func (b *builder) build(ctx context.Context, src *source, t target) (artifact, e
 		"build",
 		"-overlay=" + src.Overlay,
 		"-trimpath",
-		"-buildvcs=false",
-		"-ldflags=-s -w -buildid=",
-		"-o", tmpPath,
-		src.Path,
 	}
+	if b.buildVCS {
+		args = append(args, "-buildvcs=false")
+	}
+	args = append(args, "-ldflags=-s -w -buildid=", "-o", tmpPath, src.Path)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = src.Dir
 	cmd.Env = buildEnv(t)
@@ -332,9 +353,9 @@ func (b *builder) buildMany(ctx context.Context, src *source, targets []target, 
 		a     artifact
 		err   error
 	}, len(targets))
-	workers := min(jobs, len(targets))
+	workers := minInt(jobs, len(targets))
 	var wg sync.WaitGroup
-	for range workers {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -855,7 +876,7 @@ func shiftedELF(data []byte, payloadOffset, phdrOffset int64) (elfHeader, error)
 	binary.LittleEndian.PutUint16(header[60:62], 0)
 	binary.LittleEndian.PutUint16(header[62:64], 0)
 	phdrs := append([]byte(nil), data[phoff:phoff+int64(phentsize*phnum)]...)
-	for i := range phnum {
+	for i := 0; i < phnum; i++ {
 		entry := phdrs[i*phentsize : (i+1)*phentsize]
 		filesz := binary.LittleEndian.Uint64(entry[32:40])
 		if filesz != 0 {
@@ -967,7 +988,7 @@ func padTo(dst io.Writer, position *int64, target int64) error {
 	}
 	zero := make([]byte, 32<<10)
 	for *position < target {
-		n := min(int64(len(zero)), target-*position)
+		n := minInt64(int64(len(zero)), target-*position)
 		written, err := dst.Write(zero[:n])
 		*position += int64(written)
 		if err != nil {
@@ -975,6 +996,20 @@ func padTo(dst io.Writer, position *int64, target int64) error {
 		}
 	}
 	return nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func alignUp(value, alignment int64) int64 {
